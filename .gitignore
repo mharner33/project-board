@@ -174,3 +174,15 @@ cython_debug/
 
 .DS_Store
 
+# Frontend build output
+frontend/out/
+frontend/.next/
+frontend/node_modules/
+
+# SQLite database
+*.sqlite
+*.sqlite-journal
+
+# Docker
+app-data/
+

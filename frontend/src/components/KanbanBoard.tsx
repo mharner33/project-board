@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DndContext,
   DragOverlay,
@@ -13,83 +13,122 @@ import {
 } from "@dnd-kit/core";
 import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
-import { createId, initialData, moveCard, type BoardData } from "@/lib/kanban";
+import { ChatSidebar } from "@/components/ChatSidebar";
+import { useAuth } from "@/components/AuthProvider";
+import { dndId, findCard, findCardColumn, parseDndId, type BoardData } from "@/lib/kanban";
+import * as api from "@/lib/api";
 
 export const KanbanBoard = () => {
-  const [board, setBoard] = useState<BoardData>(() => initialData);
-  const [activeCardId, setActiveCardId] = useState<string | null>(null);
+  const { logout, username } = useAuth() as { logout: () => void; username: string };
+  const [board, setBoard] = useState<BoardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [activeCardId, setActiveCardId] = useState<number | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const renameTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
+  useEffect(() => {
+    api.fetchBoard().then(setBoard).catch(console.error).finally(() => setLoading(false));
+  }, []);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { distance: 6 },
-    })
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
 
-  const cardsById = useMemo(() => board.cards, [board.cards]);
-
   const handleDragStart = (event: DragStartEvent) => {
-    setActiveCardId(event.active.id as string);
+    const parsed = parseDndId(event.active.id as string);
+    if (parsed?.type === "card") setActiveCardId(parsed.id);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    setActiveCardId(null);
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      setActiveCardId(null);
+      if (!board) return;
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
 
-    if (!over || active.id === over.id) {
-      return;
-    }
+      const activeParsed = parseDndId(active.id as string);
+      const overParsed = parseDndId(over.id as string);
+      if (!activeParsed || activeParsed.type !== "card" || !overParsed) return;
 
-    setBoard((prev) => ({
-      ...prev,
-      columns: moveCard(prev.columns, active.id as string, over.id as string),
-    }));
-  };
+      const cardId = activeParsed.id;
+      let targetColId: number;
+      let targetPos: number;
 
-  const handleRenameColumn = (columnId: string, title: string) => {
-    setBoard((prev) => ({
-      ...prev,
-      columns: prev.columns.map((column) =>
-        column.id === columnId ? { ...column, title } : column
-      ),
-    }));
-  };
+      if (overParsed.type === "col") {
+        targetColId = overParsed.id;
+        const col = board.columns.find((c) => c.id === targetColId);
+        targetPos = col ? col.cards.length : 0;
+      } else {
+        const targetCol = findCardColumn(board, overParsed.id);
+        if (!targetCol) return;
+        targetColId = targetCol.id;
+        targetPos = targetCol.cards.findIndex((c) => c.id === overParsed.id);
+        if (targetPos === -1) targetPos = targetCol.cards.length;
+      }
 
-  const handleAddCard = (columnId: string, title: string, details: string) => {
-    const id = createId("card");
-    setBoard((prev) => ({
-      ...prev,
-      cards: {
-        ...prev.cards,
-        [id]: { id, title, details: details || "No details yet." },
-      },
-      columns: prev.columns.map((column) =>
-        column.id === columnId
-          ? { ...column, cardIds: [...column.cardIds, id] }
-          : column
-      ),
-    }));
-  };
+      // Optimistic: move card in local state
+      setBoard((prev) => {
+        if (!prev) return prev;
+        const card = findCard(prev, cardId);
+        if (!card) return prev;
+        const columns = prev.columns.map((col) => ({
+          ...col,
+          cards: col.cards.filter((c) => c.id !== cardId),
+        }));
+        const targetColumn = columns.find((c) => c.id === targetColId);
+        if (targetColumn) {
+          targetColumn.cards.splice(targetPos, 0, { ...card, position: targetPos });
+          targetColumn.cards.forEach((c, i) => (c.position = i));
+        }
+        return { ...prev, columns };
+      });
 
-  const handleDeleteCard = (columnId: string, cardId: string) => {
+      api.moveCard(cardId, targetColId, targetPos).then(setBoard).catch(console.error);
+    },
+    [board]
+  );
+
+  const handleRenameColumn = useCallback((columnId: number, title: string) => {
     setBoard((prev) => {
+      if (!prev) return prev;
       return {
         ...prev,
-        cards: Object.fromEntries(
-          Object.entries(prev.cards).filter(([id]) => id !== cardId)
-        ),
-        columns: prev.columns.map((column) =>
-          column.id === columnId
-            ? {
-                ...column,
-                cardIds: column.cardIds.filter((id) => id !== cardId),
-              }
-            : column
+        columns: prev.columns.map((col) =>
+          col.id === columnId ? { ...col, title } : col
         ),
       };
     });
-  };
 
-  const activeCard = activeCardId ? cardsById[activeCardId] : null;
+    const existing = renameTimers.current.get(columnId);
+    if (existing) clearTimeout(existing);
+    renameTimers.current.set(
+      columnId,
+      setTimeout(() => {
+        api.renameColumn(columnId, title).catch(console.error);
+        renameTimers.current.delete(columnId);
+      }, 500)
+    );
+  }, []);
+
+  const handleAddCard = useCallback((columnId: number, title: string, details: string) => {
+    api.createCard(columnId, title, details || "").then(setBoard).catch(console.error);
+  }, []);
+
+  const handleDeleteCard = useCallback((_columnId: number, cardId: number) => {
+    api.deleteCard(cardId).then(setBoard).catch(console.error);
+  }, []);
+
+  if (loading || !board) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">
+          Loading board...
+        </p>
+      </div>
+    );
+  }
+
+  const activeCard = activeCardId ? findCard(board, activeCardId) : null;
 
   return (
     <div className="relative overflow-hidden">
@@ -111,13 +150,29 @@ export const KanbanBoard = () => {
                 and capture quick notes without getting buried in settings.
               </p>
             </div>
-            <div className="rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-5 py-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[var(--gray-text)]">
-                Focus
-              </p>
-              <p className="mt-2 text-lg font-semibold text-[var(--primary-blue)]">
-                One board. Five columns. Zero clutter.
-              </p>
+            <div className="flex items-start gap-4">
+              <button
+                type="button"
+                onClick={() => setChatOpen(true)}
+                className="rounded-xl bg-[var(--secondary-purple)] px-5 py-3 text-xs font-semibold uppercase tracking-wide text-white transition hover:brightness-110"
+              >
+                AI Chat
+              </button>
+              <div className="rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-5 py-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[var(--gray-text)]">
+                  Signed in as
+                </p>
+                <p className="mt-2 text-lg font-semibold text-[var(--primary-blue)]">
+                  {username}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={logout}
+                className="rounded-full border border-[var(--stroke)] px-4 py-2 text-xs font-semibold uppercase tracking-wide text-[var(--gray-text)] transition hover:text-[var(--navy-dark)]"
+              >
+                Sign out
+              </button>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-4">
@@ -144,7 +199,6 @@ export const KanbanBoard = () => {
               <KanbanColumn
                 key={column.id}
                 column={column}
-                cards={column.cardIds.map((cardId) => board.cards[cardId])}
                 onRename={handleRenameColumn}
                 onAddCard={handleAddCard}
                 onDeleteCard={handleDeleteCard}
@@ -160,6 +214,12 @@ export const KanbanBoard = () => {
           </DragOverlay>
         </DndContext>
       </main>
+
+      <ChatSidebar
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+        onBoardUpdate={setBoard}
+      />
     </div>
   );
 };

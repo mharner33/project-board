@@ -1,26 +1,24 @@
 import clsx from "clsx";
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import type { Card, Column } from "@/lib/kanban";
+import { dndId, type Column } from "@/lib/kanban";
 import { KanbanCard } from "@/components/KanbanCard";
 import { NewCardForm } from "@/components/NewCardForm";
 
 type KanbanColumnProps = {
   column: Column;
-  cards: Card[];
-  onRename: (columnId: string, title: string) => void;
-  onAddCard: (columnId: string, title: string, details: string) => void;
-  onDeleteCard: (columnId: string, cardId: string) => void;
+  onRename: (columnId: number, title: string) => void;
+  onAddCard: (columnId: number, title: string, details: string) => void;
+  onDeleteCard: (columnId: number, cardId: number) => void;
 };
 
 export const KanbanColumn = ({
   column,
-  cards,
   onRename,
   onAddCard,
   onDeleteCard,
 }: KanbanColumnProps) => {
-  const { setNodeRef, isOver } = useDroppable({ id: column.id });
+  const { setNodeRef, isOver } = useDroppable({ id: dndId("col", column.id) });
 
   return (
     <section
@@ -36,7 +34,7 @@ export const KanbanColumn = ({
           <div className="flex items-center gap-3">
             <div className="h-2 w-10 rounded-full bg-[var(--accent-yellow)]" />
             <span className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">
-              {cards.length} cards
+              {column.cards.length} cards
             </span>
           </div>
           <input
@@ -48,8 +46,11 @@ export const KanbanColumn = ({
         </div>
       </div>
       <div className="mt-4 flex flex-1 flex-col gap-3">
-        <SortableContext items={column.cardIds} strategy={verticalListSortingStrategy}>
-          {cards.map((card) => (
+        <SortableContext
+          items={column.cards.map((c) => dndId("card", c.id))}
+          strategy={verticalListSortingStrategy}
+        >
+          {column.cards.map((card) => (
             <KanbanCard
               key={card.id}
               card={card}
@@ -57,7 +58,7 @@ export const KanbanColumn = ({
             />
           ))}
         </SortableContext>
-        {cards.length === 0 && (
+        {column.cards.length === 0 && (
           <div className="flex flex-1 items-center justify-center rounded-2xl border border-dashed border-[var(--stroke)] px-3 py-6 text-center text-xs font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">
             Drop a card here
           </div>
