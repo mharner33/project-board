@@ -13,6 +13,10 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { ...authHeaders(), ...init?.headers },
   });
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth/")) {
+      localStorage.removeItem("token");
+      window.location.reload();
+    }
     const body = await res.text().catch(() => "");
     throw new Error(body || `HTTP ${res.status}`);
   }

@@ -14,6 +14,10 @@ load_dotenv()
 
 MODEL = "openai/gpt-oss-120b"
 
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
+
 _client: OpenAI | None = None
 
 
@@ -22,7 +26,7 @@ def get_ai_client() -> OpenAI:
     if _client is None:
         _client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ["OPENROUTER_API_KEY"],
+            api_key=OPENROUTER_API_KEY,
         )
     return _client
 
@@ -118,6 +122,14 @@ def _parse_ai_response(raw: str) -> AIResponse:
         pass
 
     # Try extracting JSON from markdown fences or surrounding text
+    match = re.search(r"\{[\s\S]*?\}", raw)
+    if match:
+        try:
+            return AIResponse.model_validate_json(match.group())
+        except Exception:
+            pass
+
+    # Fallback: greedy match for nested braces (e.g. board_updates with objects)
     match = re.search(r"\{[\s\S]*\}", raw)
     if match:
         try:

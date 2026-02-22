@@ -1,8 +1,11 @@
+import sqlite3
+
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from auth import create_token, get_current_user
-from database import get_db
+from database import get_conn
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -22,16 +25,12 @@ class UserResponse(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(body: LoginRequest):
-    conn = get_db()
-    try:
-        row = conn.execute(
-            "SELECT username, password_hash FROM users WHERE username = ?",
-            (body.username,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row or row["password_hash"] != body.password:
+def login(body: LoginRequest, conn: sqlite3.Connection = Depends(get_conn)):
+    row = conn.execute(
+        "SELECT username, password_hash FROM users WHERE username = ?",
+        (body.username,),
+    ).fetchone()
+    if not row or not bcrypt.checkpw(body.password.encode(), row["password_hash"].encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
         )

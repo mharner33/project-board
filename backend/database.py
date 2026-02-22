@@ -1,5 +1,8 @@
 import sqlite3
+from collections.abc import Generator
 from pathlib import Path
+
+import bcrypt
 
 DB_PATH = Path(__file__).parent / "data" / "kanban.db"
 
@@ -45,18 +48,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS boards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id),
+            user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
             name TEXT NOT NULL DEFAULT 'My Board'
         );
         CREATE TABLE IF NOT EXISTS columns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            board_id INTEGER NOT NULL REFERENCES boards(id),
+            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             position INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            column_id INTEGER NOT NULL REFERENCES columns(id),
+            column_id INTEGER NOT NULL REFERENCES columns(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             details TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL
@@ -67,9 +70,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     if not existing:
         conn.execute(
             "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-            ("user", "password"),
+            ("user", bcrypt.hashpw(b"password", bcrypt.gensalt()).decode()),
         )
         conn.commit()
+
+
+def get_conn() -> Generator[sqlite3.Connection, None, None]:
+    conn = get_db()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def ensure_board_for_user(conn: sqlite3.Connection, username: str) -> int:
@@ -78,26 +89,27 @@ def ensure_board_for_user(conn: sqlite3.Connection, username: str) -> int:
         raise ValueError(f"User {username} not found")
     user_id = user["id"]
 
-    board = conn.execute("SELECT id FROM boards WHERE user_id = ?", (user_id,)).fetchone()
-    if board:
-        return board["id"]
-
-    cur = conn.execute(
-        "INSERT INTO boards (user_id, name) VALUES (?, 'My Board')", (user_id,)
+    conn.execute(
+        "INSERT OR IGNORE INTO boards (user_id, name) VALUES (?, 'My Board')", (user_id,)
     )
-    board_id = cur.lastrowid
+    board = conn.execute("SELECT id FROM boards WHERE user_id = ?", (user_id,)).fetchone()
+    board_id = board["id"]
 
-    for pos, col_title in enumerate(SEED_COLUMNS):
-        col_cur = conn.execute(
-            "INSERT INTO columns (board_id, title, position) VALUES (?, ?, ?)",
-            (board_id, col_title, pos),
-        )
-        col_id = col_cur.lastrowid
-        for card_pos, (card_title, card_details) in enumerate(SEED_CARDS.get(col_title, [])):
-            conn.execute(
-                "INSERT INTO cards (column_id, title, details, position) VALUES (?, ?, ?, ?)",
-                (col_id, card_title, card_details, card_pos),
+    has_columns = conn.execute(
+        "SELECT 1 FROM columns WHERE board_id = ? LIMIT 1", (board_id,)
+    ).fetchone()
+    if not has_columns:
+        for pos, col_title in enumerate(SEED_COLUMNS):
+            col_cur = conn.execute(
+                "INSERT INTO columns (board_id, title, position) VALUES (?, ?, ?)",
+                (board_id, col_title, pos),
             )
+            col_id = col_cur.lastrowid
+            for card_pos, (card_title, card_details) in enumerate(SEED_CARDS.get(col_title, [])):
+                conn.execute(
+                    "INSERT INTO cards (column_id, title, details, position) VALUES (?, ?, ?, ?)",
+                    (col_id, card_title, card_details, card_pos),
+                )
 
     conn.commit()
     return board_id

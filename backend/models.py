@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CardOut(BaseModel):
@@ -24,12 +24,12 @@ class BoardOut(BaseModel):
 
 
 class RenameColumnRequest(BaseModel):
-    title: str
+    title: str = Field(min_length=1)
 
 
 class CreateCardRequest(BaseModel):
     column_id: int
-    title: str
+    title: str = Field(min_length=1)
     details: str = ""
 
 
@@ -79,12 +79,12 @@ class AIResponse(BaseModel):
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(max_length=5000)
 
 
 class ChatRequest(BaseModel):
-    message: str
-    history: list[ChatMessage] = []
+    message: str = Field(max_length=5000)
+    history: list[ChatMessage] = Field(default=[], max_length=50)
 
 
 class ChatResponse(BaseModel):

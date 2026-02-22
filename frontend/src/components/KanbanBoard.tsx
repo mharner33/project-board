@@ -24,10 +24,31 @@ export const KanbanBoard = () => {
   const [loading, setLoading] = useState(true);
   const [activeCardId, setActiveCardId] = useState<number | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [boardError, setBoardError] = useState<string | null>(null);
+  const boardRef = useRef<BoardData | null>(null);
   const renameTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    boardRef.current = board;
+  }, [board]);
+
+  const showError = useCallback((msg: string) => {
+    setBoardError(msg);
+    if (errorTimer.current) clearTimeout(errorTimer.current);
+    errorTimer.current = setTimeout(() => setBoardError(null), 5000);
+  }, []);
 
   useEffect(() => {
     api.fetchBoard().then(setBoard).catch(console.error).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      renameTimers.current.forEach(clearTimeout);
+      renameTimers.current.clear();
+      if (errorTimer.current) clearTimeout(errorTimer.current);
+    };
   }, []);
 
   const sensors = useSensors(
@@ -42,7 +63,8 @@ export const KanbanBoard = () => {
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       setActiveCardId(null);
-      if (!board) return;
+      const currentBoard = boardRef.current;
+      if (!currentBoard) return;
       const { active, over } = event;
       if (!over || active.id === over.id) return;
 
@@ -56,17 +78,18 @@ export const KanbanBoard = () => {
 
       if (overParsed.type === "col") {
         targetColId = overParsed.id;
-        const col = board.columns.find((c) => c.id === targetColId);
+        const col = currentBoard.columns.find((c) => c.id === targetColId);
         targetPos = col ? col.cards.length : 0;
       } else {
-        const targetCol = findCardColumn(board, overParsed.id);
+        const targetCol = findCardColumn(currentBoard, overParsed.id);
         if (!targetCol) return;
         targetColId = targetCol.id;
         targetPos = targetCol.cards.findIndex((c) => c.id === overParsed.id);
         if (targetPos === -1) targetPos = targetCol.cards.length;
       }
 
-      // Optimistic: move card in local state
+      // Optimistic: move card in local state, keeping previous for rollback
+      const prevBoard = currentBoard;
       setBoard((prev) => {
         if (!prev) return prev;
         const card = findCard(prev, cardId);
@@ -83,9 +106,12 @@ export const KanbanBoard = () => {
         return { ...prev, columns };
       });
 
-      api.moveCard(cardId, targetColId, targetPos).then(setBoard).catch(console.error);
+      api.moveCard(cardId, targetColId, targetPos).then(setBoard).catch(() => {
+        setBoard(prevBoard);
+        showError("Failed to move card. Change has been reverted.");
+      });
     },
-    [board]
+    [showError]
   );
 
   const handleRenameColumn = useCallback((columnId: number, title: string) => {
@@ -104,19 +130,26 @@ export const KanbanBoard = () => {
     renameTimers.current.set(
       columnId,
       setTimeout(() => {
-        api.renameColumn(columnId, title).catch(console.error);
+        api.renameColumn(columnId, title).catch(() => {
+          api.fetchBoard().then(setBoard).catch(() => {});
+          showError("Failed to rename column. Change has been reverted.");
+        });
         renameTimers.current.delete(columnId);
       }, 500)
     );
-  }, []);
+  }, [showError]);
 
   const handleAddCard = useCallback((columnId: number, title: string, details: string) => {
-    api.createCard(columnId, title, details || "").then(setBoard).catch(console.error);
-  }, []);
+    api.createCard(columnId, title, details || "").then(setBoard).catch(() => {
+      showError("Failed to add card.");
+    });
+  }, [showError]);
 
   const handleDeleteCard = useCallback((_columnId: number, cardId: number) => {
-    api.deleteCard(cardId).then(setBoard).catch(console.error);
-  }, []);
+    api.deleteCard(cardId).then(setBoard).catch(() => {
+      showError("Failed to delete card.");
+    });
+  }, [showError]);
 
   if (loading || !board) {
     return (
@@ -188,13 +221,26 @@ export const KanbanBoard = () => {
           </div>
         </header>
 
+        {boardError && (
+          <div className="flex items-center justify-between rounded-2xl border border-red-200 bg-red-50 px-6 py-4 text-sm text-red-700">
+            <span>{boardError}</span>
+            <button
+              type="button"
+              onClick={() => setBoardError(null)}
+              className="ml-4 font-semibold hover:text-red-900"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         <DndContext
           sensors={sensors}
           collisionDetection={closestCorners}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         >
-          <section className="grid gap-6 lg:grid-cols-5">
+          <section className="grid gap-6" style={{ gridTemplateColumns: `repeat(${board.columns.length}, minmax(0, 1fr))` }}>
             {board.columns.map((column) => (
               <KanbanColumn
                 key={column.id}

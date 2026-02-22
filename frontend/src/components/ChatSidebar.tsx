@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { sendChat, type ChatMessage } from "@/lib/api";
 import type { BoardData } from "@/lib/kanban";
 
+type DisplayMessage = ChatMessage & { isError?: boolean };
+
 type ChatSidebarProps = {
   isOpen: boolean;
   onClose: () => void;
@@ -11,7 +13,7 @@ type ChatSidebarProps = {
 };
 
 export const ChatSidebar = ({ isOpen, onClose, onBoardUpdate }: ChatSidebarProps) => {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -28,7 +30,7 @@ export const ChatSidebar = ({ isOpen, onClose, onBoardUpdate }: ChatSidebarProps
     if (!text || sending) return;
 
     const userMsg: ChatMessage = { role: "user", content: text };
-    const history = [...messages];
+    const history = messages.filter((m) => !m.isError);
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setSending(true);
@@ -41,9 +43,10 @@ export const ChatSidebar = ({ isOpen, onClose, onBoardUpdate }: ChatSidebarProps
         onBoardUpdate(res.board);
       }
     } catch {
-      const errorMsg: ChatMessage = {
+      const errorMsg: DisplayMessage = {
         role: "assistant",
         content: "Sorry, something went wrong. Please try again.",
+        isError: true,
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -56,6 +59,8 @@ export const ChatSidebar = ({ isOpen, onClose, onBoardUpdate }: ChatSidebarProps
       className={`fixed right-0 top-0 z-50 flex h-full w-[400px] max-w-[90vw] flex-col border-l border-[var(--stroke)] bg-white shadow-[-8px_0_30px_rgba(3,33,71,0.1)] transition-transform duration-300 ${
         isOpen ? "translate-x-0" : "translate-x-full"
       }`}
+      aria-hidden={!isOpen}
+      inert={!isOpen ? true : undefined}
       data-testid="chat-sidebar"
     >
       <div className="flex items-center justify-between border-b border-[var(--stroke)] px-5 py-4">

@@ -1,9 +1,10 @@
 import logging
+import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth import get_current_user
-from database import get_db, ensure_board_for_user
+from database import get_conn, ensure_board_for_user
 from models import (
     AIResponse,
     BoardOut,
@@ -20,32 +21,28 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/board", tags=["board"])
 
 
-def _load_board(username: str) -> BoardOut:
-    conn = get_db()
-    try:
-        board_id = ensure_board_for_user(conn, username)
-        board = conn.execute("SELECT id, name FROM boards WHERE id = ?", (board_id,)).fetchone()
-        cols = conn.execute(
-            "SELECT id, title, position FROM columns WHERE board_id = ? ORDER BY position",
-            (board_id,),
+def _load_board(conn: sqlite3.Connection, username: str) -> BoardOut:
+    board_id = ensure_board_for_user(conn, username)
+    board = conn.execute("SELECT id, name FROM boards WHERE id = ?", (board_id,)).fetchone()
+    cols = conn.execute(
+        "SELECT id, title, position FROM columns WHERE board_id = ? ORDER BY position",
+        (board_id,),
+    ).fetchall()
+    columns = []
+    for col in cols:
+        cards = conn.execute(
+            "SELECT id, title, details, position FROM cards WHERE column_id = ? ORDER BY position",
+            (col["id"],),
         ).fetchall()
-        columns = []
-        for col in cols:
-            cards = conn.execute(
-                "SELECT id, title, details, position FROM cards WHERE column_id = ? ORDER BY position",
-                (col["id"],),
-            ).fetchall()
-            columns.append(
-                ColumnOut(
-                    id=col["id"],
-                    title=col["title"],
-                    position=col["position"],
-                    cards=[CardOut(**dict(c)) for c in cards],
-                )
+        columns.append(
+            ColumnOut(
+                id=col["id"],
+                title=col["title"],
+                position=col["position"],
+                cards=[CardOut(**dict(c)) for c in cards],
             )
-        return BoardOut(id=board["id"], name=board["name"], columns=columns)
-    finally:
-        conn.close()
+        )
+    return BoardOut(id=board["id"], name=board["name"], columns=columns)
 
 
 def _verify_column_ownership(conn, column_id: int, username: str) -> int:
@@ -87,122 +84,119 @@ def _reindex_column(conn, column_id: int) -> None:
 
 
 @router.get("", response_model=BoardOut)
-def get_board(username: str = Depends(get_current_user)):
-    return _load_board(username)
+def get_board(conn: sqlite3.Connection = Depends(get_conn), username: str = Depends(get_current_user)):
+    return _load_board(conn, username)
 
 
 @router.put("/columns/{column_id}", response_model=BoardOut)
 def rename_column(
     column_id: int,
     body: RenameColumnRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
     username: str = Depends(get_current_user),
 ):
-    conn = get_db()
-    try:
-        _verify_column_ownership(conn, column_id, username)
-        conn.execute("UPDATE columns SET title = ? WHERE id = ?", (body.title, column_id))
-        conn.commit()
-    finally:
-        conn.close()
-    return _load_board(username)
+    _verify_column_ownership(conn, column_id, username)
+    conn.execute("UPDATE columns SET title = ? WHERE id = ?", (body.title, column_id))
+    conn.commit()
+    return _load_board(conn, username)
 
 
 @router.post("/cards", response_model=BoardOut, status_code=status.HTTP_201_CREATED)
 def create_card(
     body: CreateCardRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
     username: str = Depends(get_current_user),
 ):
-    conn = get_db()
-    try:
-        _verify_column_ownership(conn, body.column_id, username)
-        max_pos = conn.execute(
-            "SELECT COALESCE(MAX(position), -1) AS mp FROM cards WHERE column_id = ?",
-            (body.column_id,),
-        ).fetchone()["mp"]
-        conn.execute(
-            "INSERT INTO cards (column_id, title, details, position) VALUES (?, ?, ?, ?)",
-            (body.column_id, body.title, body.details, max_pos + 1),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return _load_board(username)
+    _verify_column_ownership(conn, body.column_id, username)
+    max_pos = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) AS mp FROM cards WHERE column_id = ?",
+        (body.column_id,),
+    ).fetchone()["mp"]
+    conn.execute(
+        "INSERT INTO cards (column_id, title, details, position) VALUES (?, ?, ?, ?)",
+        (body.column_id, body.title, body.details, max_pos + 1),
+    )
+    conn.commit()
+    return _load_board(conn, username)
 
 
 @router.put("/cards/{card_id}", response_model=BoardOut)
 def update_card(
     card_id: int,
     body: UpdateCardRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
     username: str = Depends(get_current_user),
 ):
-    conn = get_db()
-    try:
-        card = _verify_card_ownership(conn, card_id, username)
-        title = body.title if body.title is not None else card["title"]
-        details = body.details if body.details is not None else card["details"]
-        conn.execute(
-            "UPDATE cards SET title = ?, details = ? WHERE id = ?",
-            (title, details, card_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return _load_board(username)
+    card = _verify_card_ownership(conn, card_id, username)
+    title = body.title if body.title is not None else card["title"]
+    details = body.details if body.details is not None else card["details"]
+    conn.execute(
+        "UPDATE cards SET title = ?, details = ? WHERE id = ?",
+        (title, details, card_id),
+    )
+    conn.commit()
+    return _load_board(conn, username)
 
 
 @router.delete("/cards/{card_id}", response_model=BoardOut)
 def delete_card(
     card_id: int,
+    conn: sqlite3.Connection = Depends(get_conn),
     username: str = Depends(get_current_user),
 ):
-    conn = get_db()
-    try:
-        card = _verify_card_ownership(conn, card_id, username)
-        conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-        _reindex_column(conn, card["column_id"])
-        conn.commit()
-    finally:
-        conn.close()
-    return _load_board(username)
+    card = _verify_card_ownership(conn, card_id, username)
+    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    _reindex_column(conn, card["column_id"])
+    conn.commit()
+    return _load_board(conn, username)
 
 
 @router.put("/cards/{card_id}/move", response_model=BoardOut)
 def move_card(
     card_id: int,
     body: MoveCardRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
     username: str = Depends(get_current_user),
 ):
-    conn = get_db()
-    try:
-        card = _verify_card_ownership(conn, card_id, username)
-        _verify_column_ownership(conn, body.column_id, username)
-        old_column_id = card["column_id"]
+    card = _verify_card_ownership(conn, card_id, username)
+    _verify_column_ownership(conn, body.column_id, username)
+    old_column_id = card["column_id"]
 
-        # Remove from old position
-        conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-        _reindex_column(conn, old_column_id)
+    # Build new ordering for source and target columns
+    old_cards = [
+        r["id"] for r in conn.execute(
+            "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (old_column_id,)
+        ).fetchall()
+    ]
+    old_cards.remove(card_id)
 
-        # Shift cards at target to make room
+    if body.column_id == old_column_id:
+        old_cards.insert(body.position, card_id)
+        for i, cid in enumerate(old_cards):
+            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
+    else:
         conn.execute(
-            "UPDATE cards SET position = position + 1 WHERE column_id = ? AND position >= ?",
-            (body.column_id, body.position),
+            "UPDATE cards SET column_id = ? WHERE id = ?",
+            (body.column_id, card_id),
         )
-        conn.execute(
-            "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-            (card_id, body.column_id, card["title"], card["details"], body.position),
-        )
-        _reindex_column(conn, body.column_id)
-        conn.commit()
-    finally:
-        conn.close()
-    return _load_board(username)
+        for i, cid in enumerate(old_cards):
+            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
+        target_cards = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM cards WHERE column_id = ? ORDER BY position", (body.column_id,)
+            ).fetchall()
+        ]
+        target_cards.remove(card_id)
+        target_cards.insert(body.position, card_id)
+        for i, cid in enumerate(target_cards):
+            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
+    conn.commit()
+    return _load_board(conn, username)
 
 
-def apply_board_updates(ai_response: AIResponse, username: str) -> None:
-    conn = get_db()
-    try:
-        board_id = ensure_board_for_user(conn, username)
-        for op in ai_response.board_updates:
+def apply_board_updates(conn: sqlite3.Connection, ai_response: AIResponse, username: str) -> None:
+    board_id = ensure_board_for_user(conn, username)
+    for op in ai_response.board_updates:
             try:
                 if op.action == "create_card":
                     col = conn.execute(
@@ -253,18 +247,46 @@ def apply_board_updates(ai_response: AIResponse, username: str) -> None:
                     if not card:
                         log.warning("AI move_card: card %d not found", op.card_id)
                         continue
+                    target_col = conn.execute(
+                        "SELECT c.id FROM columns c "
+                        "JOIN boards b ON c.board_id = b.id "
+                        "JOIN users u ON b.user_id = u.id "
+                        "WHERE c.id = ? AND u.username = ?",
+                        (op.target_column_id, username),
+                    ).fetchone()
+                    if not target_col:
+                        log.warning("AI move_card: target column %d not found", op.target_column_id)
+                        continue
                     old_col_id = card["column_id"]
-                    conn.execute("DELETE FROM cards WHERE id = ?", (op.card_id,))
-                    _reindex_column(conn, old_col_id)
-                    conn.execute(
-                        "UPDATE cards SET position = position + 1 WHERE column_id = ? AND position >= ?",
-                        (op.target_column_id, op.position),
-                    )
-                    conn.execute(
-                        "INSERT INTO cards (id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-                        (op.card_id, op.target_column_id, card["title"], card["details"], op.position),
-                    )
-                    _reindex_column(conn, op.target_column_id)
+                    old_cards = [
+                        r["id"] for r in conn.execute(
+                            "SELECT id FROM cards WHERE column_id = ? ORDER BY position",
+                            (old_col_id,),
+                        ).fetchall()
+                    ]
+                    old_cards.remove(op.card_id)
+
+                    if op.target_column_id == old_col_id:
+                        old_cards.insert(op.position, op.card_id)
+                        for i, cid in enumerate(old_cards):
+                            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
+                    else:
+                        conn.execute(
+                            "UPDATE cards SET column_id = ? WHERE id = ?",
+                            (op.target_column_id, op.card_id),
+                        )
+                        for i, cid in enumerate(old_cards):
+                            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
+                        target_cards = [
+                            r["id"] for r in conn.execute(
+                                "SELECT id FROM cards WHERE column_id = ? ORDER BY position",
+                                (op.target_column_id,),
+                            ).fetchall()
+                        ]
+                        target_cards.remove(op.card_id)
+                        target_cards.insert(op.position, op.card_id)
+                        for i, cid in enumerate(target_cards):
+                            conn.execute("UPDATE cards SET position = ? WHERE id = ?", (i, cid))
 
                 elif op.action == "delete_card":
                     card = conn.execute(
@@ -285,6 +307,4 @@ def apply_board_updates(ai_response: AIResponse, username: str) -> None:
                 log.exception("Failed to apply AI board update: %s", op)
                 continue
 
-        conn.commit()
-    finally:
-        conn.close()
+    conn.commit()

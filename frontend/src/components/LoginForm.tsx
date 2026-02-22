@@ -15,7 +15,7 @@ export const LoginForm = () => {
     setError("");
     setLoading(true);
     try {
-      await login(username, password);
+      await login(username.trim(), password);
     } catch {
       setError("Invalid username or password.");
     } finally {
